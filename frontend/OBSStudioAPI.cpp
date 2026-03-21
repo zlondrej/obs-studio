@@ -298,6 +298,23 @@ void OBSStudioAPI::obs_frontend_replay_buffer_save()
 	QMetaObject::invokeMethod(main, "ReplayBufferSave");
 }
 
+void OBSStudioAPI::obs_frontend_replay_buffer_save_duration(int duration_sec)
+{
+	obs_output_t *replay_buffer = obs_frontend_get_replay_buffer_output();
+	if (!replay_buffer)
+		return;
+
+	proc_handler_t *ph = obs_output_get_proc_handler(replay_buffer);
+	if (ph) {
+		calldata_t cd = {0};
+		calldata_set_int(&cd, "duration_sec", duration_sec);
+		proc_handler_call(ph, "save", &cd);
+		calldata_free(&cd);
+	}
+
+	obs_output_release(replay_buffer);
+}
+
 void OBSStudioAPI::obs_frontend_replay_buffer_stop()
 {
 	QMetaObject::invokeMethod(main, "StopReplayBuffer");

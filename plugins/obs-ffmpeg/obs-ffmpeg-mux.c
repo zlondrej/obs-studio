@@ -937,8 +937,13 @@ static void replay_buffer_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hot
 
 static void save_replay_proc(void *data, calldata_t *cd)
 {
+	struct ffmpeg_muxer *stream = data;
+	long long duration_sec = 0;
+
+	calldata_get_int(cd, "duration_sec", &duration_sec, sizeof(duration_sec));
+	stream->save_duration_usec = duration_sec * 1000000LL;
+
 	replay_buffer_hotkey(data, 0, NULL, true);
-	UNUSED_PARAMETER(cd);
 }
 
 static void get_last_replay(void *data, calldata_t *cd)
@@ -958,7 +963,7 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 						    replay_buffer_hotkey, stream);
 
 	proc_handler_t *ph = obs_output_get_proc_handler(output);
-	proc_handler_add(ph, "void save()", save_replay_proc, stream);
+	proc_handler_add(ph, "void save(int duration_sec)", save_replay_proc, stream);
 	proc_handler_add(ph, "void get_last_replay(out string path)", get_last_replay, stream);
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
@@ -992,6 +997,7 @@ static bool replay_buffer_start(void *data)
 	os_atomic_set_bool(&stream->active, true);
 	os_atomic_set_bool(&stream->capturing, true);
 	stream->total_bytes = 0;
+	stream->save_duration_usec = 0;
 	obs_output_begin_data_capture(stream->output, 0);
 
 	return true;
@@ -1145,8 +1151,16 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	da_reserve(stream->mux_packets, num_packets);
 
 	/* ---------------------------- */
-	/* reorder packets */
+	/* calculate duration cutoff */
 
+	struct encoder_packet *last_pkt =
+		deque_data(&stream->packets, (num_packets - 1) * size);
+	int64_t cutoff_ts = last_pkt->dts_usec;
+	if (stream->save_duration_usec > 0) {
+		cutoff_ts = cutoff_ts - stream->save_duration_usec;
+	}
+
+	/* reorder packets */
 	bool found_video = false;
 	bool found_audio[MAX_AUDIO_MIXES] = {0};
 	int64_t video_offset = 0;
@@ -1157,6 +1171,10 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	for (size_t i = 0; i < num_packets; i++) {
 		struct encoder_packet *pkt;
 		pkt = deque_data(&stream->packets, i * size);
+
+		/* skip packets outside duration window */
+		if (pkt->dts_usec < cutoff_ts)
+			continue;
 
 		if (pkt->type == OBS_ENCODER_VIDEO) {
 			if (!found_video) {
@@ -1175,6 +1193,9 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 		insert_packet(&stream->mux_packets, pkt, video_offset, audio_offsets, video_pts_offset,
 			      audio_dts_offsets);
 	}
+
+	/* reset save_duration after save */
+	stream->save_duration_usec = 0;
 
 	generate_filename(stream, &stream->path, true);
 
