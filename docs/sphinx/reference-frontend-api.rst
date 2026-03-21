@@ -677,7 +677,11 @@ Functions
 
 .. function:: void obs_frontend_replay_buffer_save_duration(int duration_sec)
 
-   Saves a limited duration segment from the replay buffer if the replay buffer is active.
+   Saves a portion of the replay buffer if the replay buffer is active.
+
+   Recording will start from the closest keyframe before the specified duration.
+   The actual recording may be slightly longer than the specified duration,
+   depending on the keyframe interval of the current video encoder.
 
    :param duration_sec: Duration in seconds to save from the end of the buffer
 

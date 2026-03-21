@@ -29,6 +29,7 @@
 
 #define warn(format, ...) do_log(LOG_WARNING, format, ##__VA_ARGS__)
 #define info(format, ...) do_log(LOG_INFO, format, ##__VA_ARGS__)
+#define debug(format, ...) do_log(LOG_DEBUG, format, ##__VA_ARGS__)
 
 static const char *ffmpeg_mux_getname(void *type)
 {
@@ -940,7 +941,7 @@ static void save_replay_proc(void *data, calldata_t *cd)
 	struct ffmpeg_muxer *stream = data;
 	long long duration_sec = 0;
 
-	calldata_get_int(cd, "duration_sec", &duration_sec, sizeof(duration_sec));
+	calldata_get_int(cd, "duration_sec", &duration_sec);
 	stream->save_duration_usec = duration_sec * 1000000LL;
 
 	replay_buffer_hotkey(data, 0, NULL, true);
@@ -1150,17 +1151,47 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 
 	da_reserve(stream->mux_packets, num_packets);
 
-	/* ---------------------------- */
-	/* calculate duration cutoff */
+	/* debug logging */
 
-	struct encoder_packet *last_pkt =
-		deque_data(&stream->packets, (num_packets - 1) * size);
-	int64_t cutoff_ts = last_pkt->dts_usec;
+	{
+		struct encoder_packet first_pkt, last_pkt;
+		deque_peek_front(&stream->packets, &first_pkt, sizeof(first_pkt));
+		deque_peek_back(&stream->packets, &last_pkt, sizeof(last_pkt));
+		debug("Saving replay buffer: buffer size = %zu packets, buffer duration = %.3f seconds",
+		     num_packets, (last_pkt.dts_usec - first_pkt.dts_usec) / 1000000.0);
+	}
+
+	/* find the closest preceding keyframe before duration cutoff */
+
+	int64_t cutoff_keyframe_index = 0;
 	if (stream->save_duration_usec > 0) {
+		struct encoder_packet last_pkt;
+		int64_t cutoff_ts = last_pkt.dts_usec;
+
+		debug("Finding keyframe cutoff: replay duration = %.3f seconds",
+			stream->save_duration_usec / 1000000.0);
+
+		deque_peek_back(&stream->packets, &last_pkt, sizeof(last_pkt));
 		cutoff_ts = cutoff_ts - stream->save_duration_usec;
+
+		for (size_t i = 0; i < num_packets; i++) {
+			struct encoder_packet *pkt;
+			pkt = deque_data(&stream->packets, i * size);
+
+			if (pkt->dts_usec > cutoff_ts) {
+				break;
+			}
+
+			if (pkt->type == OBS_ENCODER_VIDEO && pkt->keyframe) {
+				cutoff_keyframe_index = i;
+				debug("Found keyframe: packet index = %zu, replay duration = %.3f seconds",
+					cutoff_keyframe_index, (last_pkt.dts_usec - pkt->dts_usec) / 1000000.0);
+			}
+		}
 	}
 
 	/* reorder packets */
+
 	bool found_video = false;
 	bool found_audio[MAX_AUDIO_MIXES] = {0};
 	int64_t video_offset = 0;
@@ -1168,13 +1199,9 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
 	int64_t audio_dts_offsets[MAX_AUDIO_MIXES] = {0};
 
-	for (size_t i = 0; i < num_packets; i++) {
+	for (size_t i = cutoff_keyframe_index; i < num_packets; i++) {
 		struct encoder_packet *pkt;
 		pkt = deque_data(&stream->packets, i * size);
-
-		/* skip packets outside duration window */
-		if (pkt->dts_usec < cutoff_ts)
-			continue;
 
 		if (pkt->type == OBS_ENCODER_VIDEO) {
 			if (!found_video) {
